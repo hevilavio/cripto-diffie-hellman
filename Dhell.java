@@ -1,9 +1,11 @@
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.math.BigInteger;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.nio.ByteBuffer;
 
 /**
  *
@@ -20,6 +22,9 @@ public class Dhell {
 
     // A,B,C |
     public static void main(String[] args) {
+
+        final BigInteger bigInteger = new BigInteger(new byte[] { 0x10 });
+
         Dhell program = new Dhell();
         program.validateInput(args);
 
@@ -27,22 +32,39 @@ public class Dhell {
 
         switch (person){
             case "A": {
-                log("Starting Alice");
-                final Socket socket = program.waitBobToConnect();
-
+                Logger.info("Starting Alice");
+                final Socket socket = program.startConnectionAsServer();
                 new DiffieHellmanAlgorithm().playAlice(socket);
-
-
+                break;
             }
+            case "B": {
+                Logger.info("Starting Bob");
+                final Socket socket = program.startConnectionAsClient();
+                new DiffieHellmanAlgorithm().playBob(socket);
+                break;
+            }
+
         }
 
-        log("OK");
+        Logger.info("END");
     }
 
-    private Socket waitBobToConnect() {
+    private Socket startConnectionAsClient() {
+        try {
+            final Socket socket = new Socket("localhost", SOCKET_PORT);
+            logDebugMessage(socket);
+            return socket;
+
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
+    }
+
+    private Socket startConnectionAsServer() {
         try {
             ServerSocket server = new ServerSocket(SOCKET_PORT);
-            log("Waiting for someone to connect on port " + SOCKET_PORT);
+            Logger.info("Waiting for someone to connect on port " + SOCKET_PORT);
             final Socket socket = server.accept();
 
             logDebugMessage(socket);
@@ -56,29 +78,15 @@ public class Dhell {
 
     private void logDebugMessage(Socket socket) {
         final InetSocketAddress remoteSocketAddress = (InetSocketAddress) socket.getRemoteSocketAddress();
-        debug("Someone connected on " + SOCKET_PORT
-                + ", remote_addr=" + remoteSocketAddress.getAddress().getHostAddress()
-                + ", remote_port=" + remoteSocketAddress.getPort());
+        Logger.debug(
+                "Connected on " + SOCKET_PORT + ", remote_addr=" + remoteSocketAddress.getAddress().getHostAddress()
+                        + ", remote_port=" + remoteSocketAddress.getPort());
     }
 
     private void validateInput(String[] args) {
         if(args == null || args.length == 0){
-            err("Invalid Usage. Shoud be: 'java Dhell A|B|C'");
+            Logger.err("Invalid Usage. Shoud be: 'java Dhell A|B|C'");
             System.exit(-1);
-        }
-    }
-
-    private static void err(String msg) {
-        System.err.println(msg);
-    }
-
-    private static void log(String msg) {
-        System.out.println(msg);
-    }
-
-    private void debug(String msg) {
-        if(DEBUG_ENABLED){
-            log(msg);
         }
     }
 }
@@ -88,10 +96,9 @@ class DiffieHellmanAlgorithm {
     BigInteger modulus_p = BigInteger.valueOf(23L);
     BigInteger base_g = BigInteger.valueOf(5L);
 
-    byte msg_A_identifier = 0x01;
+    private int HEADER_LENGTH = 4;
 
     public void playAlice(Socket socket) {
-        Logger.info("Playing Alice's role");
 
         BigInteger secret = chooseSecret(6);
         Logger.info("[SECRET] Alice choose [" + secret.longValue() + "] as her secret");
@@ -99,16 +106,77 @@ class DiffieHellmanAlgorithm {
         final BigInteger A = base_g.pow(secret.intValue()).mod(modulus_p);
         Logger.info("Sending [" + A.longValue() + "] as A value to Bob");
 
-        sendAValue(socket, A.toByteArray());
-        //waitForBValue(socket);
+        writeValue(socket, A.toByteArray());
+        final BigInteger B = readValue(socket);
+
+        Logger.info("Alice received [" + B.longValue() + "] as Bob's B value");
+
+        // SHARED SECRET
+        Logger.debug("B(" + B.longValue() + ") ^ secret(" + secret.longValue() + ") % p("
+                + modulus_p.longValue() + ")");
+
+        final BigInteger s = B.pow(secret.intValue()).mod(modulus_p);
+        Logger.info("Shared secret is [" + s.longValue() + "]");
+    }
+
+    public void playBob(Socket socket) {
+
+        final BigInteger A = readValue(socket);
+        Logger.info("Bob received [" + A.longValue() + "] as Alice's A value");
+
+        BigInteger secret = chooseSecret(15);
+        Logger.info("[SECRET] Bob choose [" + secret.longValue() + "] as his secret");
+
+        final BigInteger B = base_g.pow(secret.intValue()).mod(modulus_p);
+        Logger.info("Sending [" + B.longValue() + "] as B value to Alice");
+
+        writeValue(socket, B.toByteArray());
+
+        // SHARED SECRET
+        Logger.debug("A(" + A.longValue() + ") ^ secret(" + secret.longValue() + ") % p("
+                + modulus_p.longValue() + ")");
+
+        final BigInteger s = A.pow(secret.intValue()).mod(modulus_p);
+        Logger.info("Shared secret is [" + s.longValue() + "]");
+
 
     }
 
-    private void sendAValue(Socket socket, byte[] bytes) {
+    private BigInteger readValue(Socket socket) {
+
+        byte[] header = new byte[HEADER_LENGTH];
+
+        try {
+            final InputStream inputStream = socket.getInputStream();
+
+            for (int i = 0; i < HEADER_LENGTH; i++) {
+                header[i] = (byte) inputStream.read();
+            }
+            final int messageSize = ByteBuffer.wrap(header).getInt();
+            Logger.debug("Received a message with [" + messageSize + "] bytes");
+
+            final byte[] buffer = ByteBuffer.allocate(messageSize).array();
+            inputStream.read(buffer);
+
+            final BigInteger message = new BigInteger(buffer);
+
+            Logger.debug("Message with [" + messageSize + "] bytes has value = " + message.longValue());
+
+            return message;
+
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void writeValue(Socket socket, byte[] bytes) {
         try {
             final OutputStream out = socket.getOutputStream();
-            out.write(msg_A_identifier);
+            final byte[] messageLength = ByteBuffer.allocate(HEADER_LENGTH).putInt(bytes.length).array();
+
+            out.write(messageLength);
             out.write(bytes);
+
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
@@ -122,7 +190,7 @@ class DiffieHellmanAlgorithm {
 
 class Logger {
 
-    private boolean DEBUG_ENABLED = true;
+    private static boolean DEBUG_ENABLED = false;
 
     public static void err(String msg) {
         System.err.println(msg);
@@ -132,7 +200,7 @@ class Logger {
         System.out.println(msg);
     }
 
-    public void debug(String msg) {
+    public static void debug(String msg) {
         if(DEBUG_ENABLED){
             info(msg);
         }
